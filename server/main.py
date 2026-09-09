@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
@@ -5,6 +6,9 @@ from pydantic import BaseModel
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
 app = FastAPI(title="Factory Inventory Management System")
+
+# Fixed delivery lead time (in days) applied to every submitted restocking order
+LEAD_TIME_DAYS = 7
 
 # Quarter mapping for date filtering
 QUARTER_MAP = {
@@ -89,6 +93,7 @@ class DemandForecast(BaseModel):
     forecasted_demand: int
     trend: str
     period: str
+    unit_cost: float
 
 class BacklogItem(BaseModel):
     id: str
@@ -119,6 +124,32 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockOrderItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_price: float
+
+class CreateRestockOrderRequest(BaseModel):
+    items: List[RestockOrderItem]
+    total_value: float
+    budget: Optional[float] = None
+
+class RestockOrder(BaseModel):
+    id: str
+    order_number: str
+    items: List[RestockOrderItem]
+    total_value: float
+    status: str
+    order_date: str
+    expected_delivery: str
+    lead_time_days: int
+
+# Restocking orders submitted from the Restocking tab. This is intentionally
+# runtime-only state (not loaded from / written to server/data): the app has no
+# database, so submitted orders live only until the server restarts.
+submitted_restock_orders: List[dict] = []
 
 # API endpoints
 @app.get("/")
@@ -165,6 +196,30 @@ def get_order(order_id: str):
 def get_demand_forecasts():
     """Get demand forecasts"""
     return demand_forecasts
+
+@app.get("/api/restock-orders", response_model=List[RestockOrder])
+def get_restock_orders():
+    """Get restocking orders submitted from the Restocking tab"""
+    return submitted_restock_orders
+
+@app.post("/api/restock-orders", response_model=RestockOrder, status_code=201)
+def create_restock_order(req: CreateRestockOrderRequest):
+    """Submit a restocking order. Appends to the in-memory list and echoes back
+    the created order with a generated number and a fixed 7-day lead time."""
+    now = datetime.now()
+    seq = len(submitted_restock_orders) + 1
+    order = {
+        "id": str(seq),
+        "order_number": f"RSO-{now.year}-{seq:04d}",
+        "items": [item.model_dump() for item in req.items],
+        "total_value": round(req.total_value, 2),
+        "status": "Submitted",
+        "order_date": now.isoformat(timespec="seconds"),
+        "expected_delivery": (now + timedelta(days=LEAD_TIME_DAYS)).isoformat(timespec="seconds"),
+        "lead_time_days": LEAD_TIME_DAYS,
+    }
+    submitted_restock_orders.append(order)
+    return order
 
 @app.get("/api/backlog", response_model=List[BacklogItem])
 def get_backlog():
